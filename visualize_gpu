@@ -1,0 +1,814 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>CUDA PTX 可视化执行 on SM (最终精调版)</title>
+    <style>
+        :root {
+            --bg-color: #282c34;
+            --font-color: #abb2bf;
+            --sm-bg: #3c4049;
+            --sm-border: #4f535d;
+            --l0-cache-bg: #4f8bc9;
+            --scheduler-bg: #e69d48;
+            --dispatch-bg: #c97833;
+            --regfile-bg: #2e6b5d;
+            --int32-bg: #4a505a;
+            --fp32-bg: #6a8a6b;
+            --fp64-bg: #5a6e5f;
+            --ld-st-bg: #b5654d;
+            --tensor-core-bg: #46874e;
+            --sfu-bg: #d16b6b;
+            --l1-cache-bg: #5c7e9e;
+            --highlight-bg: #ffd700;
+            --highlight-border: #ff4500;
+            --code-highlight-bg: rgba(255, 215, 0, 0.3);
+            --tensor-highlight-glow: #00ff00;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background-color: var(--bg-color);
+            color: var(--font-color);
+            margin: 0;
+            padding: 20px;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            height: 100vh;
+            box-sizing: border-box;
+        }
+
+        h1 {
+            color: #61afef;
+            border-bottom: 2px solid #61afef;
+            padding-bottom: 10px;
+            margin-top: 0;
+            flex-shrink: 0;
+        }
+
+        .controls {
+            width: 98%;
+            max-width: 2000px;
+            margin-bottom: 15px;
+            background-color: var(--sm-bg);
+            padding: 15px;
+            border-radius: 8px;
+            display: flex;
+            align-items: center;
+            gap: 20px;
+            box-shadow: 0 4px 8px rgba(0,0,0,0.3);
+            flex-shrink: 0;
+        }
+        .controls label { font-weight: bold; }
+        .controls select, .controls button {
+            padding: 8px 12px; border-radius: 5px; border: 1px solid var(--sm-border);
+            background-color: var(--bg-color); color: var(--font-color); font-size: 16px; cursor: pointer;
+        }
+        .controls button:hover { background-color: #4f535d; }
+        
+        .main-container {
+            display: flex;
+            gap: 20px;
+            width: 98%;
+            max-width: 2000px;
+            flex-grow: 1;
+            min-height: 0;
+        }
+
+        .visualization-wrapper, .code-container {
+            height: 100%;
+            background-color: var(--sm-bg);
+            border-radius: 8px;
+            padding: 15px;
+            box-sizing: border-box;
+        }
+        
+        .visualization-wrapper {
+            flex: 1.2;
+            overflow: hidden; /* Hides all scrollbars */
+        }
+        
+        .code-container {
+            flex: 1;
+            background-color: #21252b;
+            overflow-y: auto; /* Code container still scrolls */
+        }
+
+        /* SM Diagram Styles */
+        .sm-embedded-title {
+            font-weight: bold;
+            font-size: 16px; /* Slightly smaller */
+            color: var(--font-color);
+            padding: 0 0 10px 5px; /* Reduced padding */
+        }
+
+        .sm-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; } /* Reduced gap */
+        .sm-partition { border: 2px solid var(--sm-border); border-radius: 5px; padding: 5px; background-color: #31353f; }
+        .sm-block {
+            color: white; padding: 3px; text-align: center; font-size: 9px; /* Smaller font and padding */
+            border-radius: 3px; margin-bottom: 3px; /* Reduced margin */
+            font-weight: 500;
+            transition: all 0.2s ease-in-out;
+        }
+
+        .l0-cache { background-color: var(--l0-cache-bg); }
+        .warp-scheduler { background-color: var(--scheduler-bg); }
+        .dispatch-unit { background-color: var(--dispatch-bg); }
+        .register-file { background-color: var(--regfile-bg); }
+        
+        .exec-grid { display: grid; gap: 3px; grid-template-columns: repeat(4, 1fr) 1.5fr; } /* Reduced gap */
+        .exec-unit { background-color: var(--int32-bg); }
+        .fp32 { background-color: var(--fp32-bg); }
+        .ld-st { background-color: var(--ld-st-bg); }
+        .tensor-core { background-color: var(--tensor-core-bg); display: flex; align-items: center; justify-content: center; grid-column: 5; grid-row: 1 / span 8; }
+        .sfu { background-color: var(--sfu-bg); grid-column: 5; grid-row: 9; }
+
+        .l1-cache-container { margin-bottom: 8px; } /* Reduced margin */
+        .l1-cache-container.bottom { margin-top: 8px; margin-bottom: 0; } /* Reduced margin */
+        .l1-cache { background-color: var(--l1-cache-bg); text-align: center; padding: 8px; border-radius: 5px; font-weight: bold; } /* Reduced padding */
+
+        .highlight {
+            background-color: var(--highlight-bg) !important; border: 2px solid var(--highlight-border) !important;
+            box-shadow: 0 0 15px var(--highlight-bg); transform: scale(1.05);
+            color: black !important; font-weight: bold;
+        }
+        .highlight-tensor-simulation {
+            box-shadow: 0 0 15px 5px var(--tensor-highlight-glow);
+            border: 2px solid var(--tensor-highlight-glow);
+            transform: scale(1.05);
+        }
+
+        /* Code Viewer Styles */
+        #code-display { counter-reset: line; white-space: pre; }
+        #code-display .code-line { display: block; padding-left: 4em; position: relative; transition: background-color 0.2s; }
+        #code-display .code-line::before {
+            counter-increment: line; content: counter(line); position: absolute;
+            left: 0; width: 3em; text-align: right; color: #5c6370; padding-right: 1em; -webkit-user-select: none;
+        }
+        .code-line.highlight-code { background-color: var(--code-highlight-bg); }
+
+        /* Explanation Styles */
+        .explanation-container {
+            width: 98%; max-width: 2000px; margin-top: 15px;
+            background-color: #21252b; padding: 20px; border-radius: 8px; border-left: 5px solid #61afef;
+            flex-shrink: 0;
+        }
+        .explanation-container h3 { margin-top: 0; color: #98c379; }
+    </style>
+</head>
+<body>
+
+    <h1>CUDA PTX 可视化执行 on SM (最终精调版)</h1>
+
+    <div class="controls">
+        <label for="kernel-select">选择核函数:</label>
+        <select id="kernel-select">
+            <option value="qk_transpose_kernel">_Z19qk_transpose_kernel</option>
+            <option value="softmax_kernel">_Z14softmax_kernel</option>
+            <option value="pv_kernel">_Z9pv_kernel</option>
+        </select>
+        <button id="step-btn">单步执行</button>
+        <button id="reset-btn">重置</button>
+    </div>
+
+    <div class="main-container">
+        <div class="visualization-wrapper">
+            <div class="sm-embedded-title">SM</div>
+            <div class="l1-cache-container">
+                <div class="sm-block l1-cache">L1 Instruction Cache</div>
+            </div>
+            <div class="sm-grid">
+                <!-- All 4 partitions now have the identical, detailed layout -->
+                <!-- Partition 0 (Top-Left) -->
+                <div class="sm-partition" id="sm-partition-0">
+                    <div class="sm-block l0-cache">L0 Instruction Cache</div>
+                    <div class="sm-block warp-scheduler" id="warp-scheduler-0">Warp Scheduler</div>
+                    <div class="sm-block dispatch-unit" id="dispatch-unit-0">Dispatch Unit</div>
+                    <div class="sm-block register-file" id="register-file-0">Register File</div>
+                    <div class="exec-grid">
+                        <div class="sm-block exec-unit" id="int32-0-0">INT32</div><div class="sm-block exec-unit" id="int32-0-1">INT32</div><div class="sm-block fp32" id="fp32-0-0">FP32</div><div class="sm-block fp32" id="fp32-0-1">FP32</div>
+                        <div class="sm-block exec-unit" id="int32-0-2">INT32</div><div class="sm-block exec-unit" id="int32-0-3">INT32</div><div class="sm-block fp32" id="fp32-0-2">FP32</div><div class="sm-block fp32" id="fp32-0-3">FP32</div>
+                        <div class="sm-block exec-unit" id="int32-0-4">INT32</div><div class="sm-block exec-unit" id="int32-0-5">INT32</div><div class="sm-block fp32" id="fp32-0-4">FP32</div><div class="sm-block fp32" id="fp32-0-5">FP32</div>
+                        <div class="sm-block exec-unit" id="int32-0-6">INT32</div><div class="sm-block exec-unit" id="int32-0-7">INT32</div><div class="sm-block fp32" id="fp32-0-6">FP32</div><div class="sm-block fp32" id="fp32-0-7">FP32</div>
+                        <div class="sm-block exec-unit" id="int32-0-8">INT32</div><div class="sm-block exec-unit" id="int32-0-9">INT32</div><div class="sm-block fp32" id="fp32-0-8">FP32</div><div class="sm-block fp32" id="fp32-0-9">FP32</div>
+                        <div class="sm-block exec-unit" id="int32-0-10">INT32</div><div class="sm-block exec-unit" id="int32-0-11">INT32</div><div class="sm-block fp32" id="fp32-0-10">FP32</div><div class="sm-block fp32" id="fp32-0-11">FP32</div>
+                        <div class="sm-block exec-unit" id="int32-0-12">INT32</div><div class="sm-block exec-unit" id="int32-0-13">INT32</div><div class="sm-block fp32" id="fp32-0-12">FP32</div><div class="sm-block fp32" id="fp32-0-13">FP32</div>
+                        <div class="sm-block exec-unit" id="int32-0-14">INT32</div><div class="sm-block exec-unit" id="int32-0-15">INT32</div><div class="sm-block fp32" id="fp32-0-14">FP32</div><div class="sm-block fp32" id="fp32-0-15">FP32</div>
+                        <div class="sm-block ld-st" id="ld-st-0-0">LD/ST</div><div class="sm-block ld-st" id="ld-st-0-1">LD/ST</div><div class="sm-block ld-st" id="ld-st-0-2">LD/ST</div><div class="sm-block ld-st" id="ld-st-0-3">LD/ST</div>
+                        <div class="sm-block tensor-core" id="tensor-core-0">TENSOR CORE</div>
+                        <div class="sm-block sfu" id="sfu-0">SFU</div>
+                    </div>
+                </div>
+                <!-- Partition 1 (Top-Right) -->
+                <div class="sm-partition" id="sm-partition-1">
+                    <div class="sm-block l0-cache">L0 Instruction Cache</div>
+                    <div class="sm-block warp-scheduler" id="warp-scheduler-1">Warp Scheduler</div>
+                    <div class="sm-block dispatch-unit" id="dispatch-unit-1">Dispatch Unit</div>
+                    <div class="sm-block register-file" id="register-file-1">Register File</div>
+                    <div class="exec-grid">
+                        <div class="sm-block exec-unit" id="int32-1-0">INT32</div><div class="sm-block exec-unit" id="int32-1-1">INT32</div><div class="sm-block fp32" id="fp32-1-0">FP32</div><div class="sm-block fp32" id="fp32-1-1">FP32</div>
+                        <div class="sm-block exec-unit" id="int32-1-2">INT32</div><div class="sm-block exec-unit" id="int32-1-3">INT32</div><div class="sm-block fp32" id="fp32-1-2">FP32</div><div class="sm-block fp32" id="fp32-1-3">FP32</div>
+                        <div class="sm-block exec-unit" id="int32-1-4">INT32</div><div class="sm-block exec-unit" id="int32-1-5">INT32</div><div class="sm-block fp32" id="fp32-1-4">FP32</div><div class="sm-block fp32" id="fp32-1-5">FP32</div>
+                        <div class="sm-block exec-unit" id="int32-1-6">INT32</div><div class="sm-block exec-unit" id="int32-1-7">INT32</div><div class="sm-block fp32" id="fp32-1-6">FP32</div><div class="sm-block fp32" id="fp32-1-7">FP32</div>
+                        <div class="sm-block exec-unit" id="int32-1-8">INT32</div><div class="sm-block exec-unit" id="int32-1-9">INT32</div><div class="sm-block fp32" id="fp32-1-8">FP32</div><div class="sm-block fp32" id="fp32-1-9">FP32</div>
+                        <div class="sm-block exec-unit" id="int32-1-10">INT32</div><div class="sm-block exec-unit" id="int32-1-11">INT32</div><div class="sm-block fp32" id="fp32-1-10">FP32</div><div class="sm-block fp32" id="fp32-1-11">FP32</div>
+                        <div class="sm-block exec-unit" id="int32-1-12">INT32</div><div class="sm-block exec-unit" id="int32-1-13">INT32</div><div class="sm-block fp32" id="fp32-1-12">FP32</div><div class="sm-block fp32" id="fp32-1-13">FP32</div>
+                        <div class="sm-block exec-unit" id="int32-1-14">INT32</div><div class="sm-block exec-unit" id="int32-1-15">INT32</div><div class="sm-block fp32" id="fp32-1-14">FP32</div><div class="sm-block fp32" id="fp32-1-15">FP32</div>
+                        <div class="sm-block ld-st" id="ld-st-1-0">LD/ST</div><div class="sm-block ld-st" id="ld-st-1-1">LD/ST</div><div class="sm-block ld-st" id="ld-st-1-2">LD/ST</div><div class="sm-block ld-st" id="ld-st-1-3">LD/ST</div>
+                        <div class="sm-block tensor-core" id="tensor-core-1">TENSOR CORE</div>
+                        <div class="sm-block sfu" id="sfu-1">SFU</div>
+                    </div>
+                </div>
+                 <!-- Partition 2 (Bottom-Left) -->
+                <div class="sm-partition" id="sm-partition-2">
+                    <div class="sm-block l0-cache">L0 Instruction Cache</div>
+                    <div class="sm-block warp-scheduler" id="warp-scheduler-2">Warp Scheduler</div>
+                    <div class="sm-block dispatch-unit" id="dispatch-unit-2">Dispatch Unit</div>
+                    <div class="sm-block register-file" id="register-file-2">Register File</div>
+                    <div class="exec-grid">
+                        <div class="sm-block exec-unit" id="int32-2-0">INT32</div><div class="sm-block exec-unit" id="int32-2-1">INT32</div><div class="sm-block fp32" id="fp32-2-0">FP32</div><div class="sm-block fp32" id="fp32-2-1">FP32</div>
+                        <div class="sm-block exec-unit" id="int32-2-2">INT32</div><div class="sm-block exec-unit" id="int32-2-3">INT32</div><div class="sm-block fp32" id="fp32-2-2">FP32</div><div class="sm-block fp32" id="fp32-2-3">FP32</div>
+                        <div class="sm-block exec-unit" id="int32-2-4">INT32</div><div class="sm-block exec-unit" id="int32-2-5">INT32</div><div class="sm-block fp32" id="fp32-2-4">FP32</div><div class="sm-block fp32" id="fp32-2-5">FP32</div>
+                        <div class="sm-block exec-unit" id="int32-2-6">INT32</div><div class="sm-block exec-unit" id="int32-2-7">INT32</div><div class="sm-block fp32" id="fp32-2-6">FP32</div><div class="sm-block fp32" id="fp32-2-7">FP32</div>
+                        <div class="sm-block exec-unit" id="int32-2-8">INT32</div><div class="sm-block exec-unit" id="int32-2-9">INT32</div><div class="sm-block fp32" id="fp32-2-8">FP32</div><div class="sm-block fp32" id="fp32-2-9">FP32</div>
+                        <div class="sm-block exec-unit" id="int32-2-10">INT32</div><div class="sm-block exec-unit" id="int32-2-11">INT32</div><div class="sm-block fp32" id="fp32-2-10">FP32</div><div class="sm-block fp32" id="fp32-2-11">FP32</div>
+                        <div class="sm-block exec-unit" id="int32-2-12">INT32</div><div class="sm-block exec-unit" id="int32-2-13">INT32</div><div class="sm-block fp32" id="fp32-2-12">FP32</div><div class="sm-block fp32" id="fp32-2-13">FP32</div>
+                        <div class="sm-block exec-unit" id="int32-2-14">INT32</div><div class="sm-block exec-unit" id="int32-2-15">INT32</div><div class="sm-block fp32" id="fp32-2-14">FP32</div><div class="sm-block fp32" id="fp32-2-15">FP32</div>
+                        <div class="sm-block ld-st" id="ld-st-2-0">LD/ST</div><div class="sm-block ld-st" id="ld-st-2-1">LD/ST</div><div class="sm-block ld-st" id="ld-st-2-2">LD/ST</div><div class="sm-block ld-st" id="ld-st-2-3">LD/ST</div>
+                        <div class="sm-block tensor-core" id="tensor-core-2">TENSOR CORE</div>
+                        <div class="sm-block sfu" id="sfu-2">SFU</div>
+                    </div>
+                </div>
+                 <!-- Partition 3 (Bottom-Right) -->
+                <div class="sm-partition" id="sm-partition-3">
+                    <div class="sm-block l0-cache">L0 Instruction Cache</div>
+                    <div class="sm-block warp-scheduler" id="warp-scheduler-3">Warp Scheduler</div>
+                    <div class="sm-block dispatch-unit" id="dispatch-unit-3">Dispatch Unit</div>
+                    <div class="sm-block register-file" id="register-file-3">Register File</div>
+                    <div class="exec-grid">
+                        <div class="sm-block exec-unit" id="int32-3-0">INT32</div><div class="sm-block exec-unit" id="int32-3-1">INT32</div><div class="sm-block fp32" id="fp32-3-0">FP32</div><div class="sm-block fp32" id="fp32-3-1">FP32</div>
+                        <div class="sm-block exec-unit" id="int32-3-2">INT32</div><div class="sm-block exec-unit" id="int32-3-3">INT32</div><div class="sm-block fp32" id="fp32-3-2">FP32</div><div class="sm-block fp32" id="fp32-3-3">FP32</div>
+                        <div class="sm-block exec-unit" id="int32-3-4">INT32</div><div class="sm-block exec-unit" id="int32-3-5">INT32</div><div class="sm-block fp32" id="fp32-3-4">FP32</div><div class="sm-block fp32" id="fp32-3-5">FP32</div>
+                        <div class="sm-block exec-unit" id="int32-3-6">INT32</div><div class="sm-block exec-unit" id="int32-3-7">INT32</div><div class="sm-block fp32" id="fp32-3-6">FP32</div><div class="sm-block fp32" id="fp32-3-7">FP32</div>
+                        <div class="sm-block exec-unit" id="int32-3-8">INT32</div><div class="sm-block exec-unit" id="int32-3-9">INT32</div><div class="sm-block fp32" id="fp32-3-8">FP32</div><div class="sm-block fp32" id="fp32-3-9">FP32</div>
+                        <div class="sm-block exec-unit" id="int32-3-10">INT32</div><div class="sm-block exec-unit" id="int32-3-11">INT32</div><div class="sm-block fp32" id="fp32-3-10">FP32</div><div class="sm-block fp32" id="fp32-3-11">FP32</div>
+                        <div class="sm-block exec-unit" id="int32-3-12">INT32</div><div class="sm-block exec-unit" id="int32-3-13">INT32</div><div class="sm-block fp32" id="fp32-3-12">FP32</div><div class="sm-block fp32" id="fp32-3-13">FP32</div>
+                        <div class="sm-block exec-unit" id="int32-3-14">INT32</div><div class="sm-block exec-unit" id="int32-3-15">INT32</div><div class="sm-block fp32" id="fp32-3-14">FP32</div><div class="sm-block fp32" id="fp32-3-15">FP32</div>
+                        <div class="sm-block ld-st" id="ld-st-3-0">LD/ST</div><div class="sm-block ld-st" id="ld-st-3-1">LD/ST</div><div class="sm-block ld-st" id="ld-st-3-2">LD/ST</div><div class="sm-block ld-st" id="ld-st-3-3">LD/ST</div>
+                        <div class="sm-block tensor-core" id="tensor-core-3">TENSOR CORE</div>
+                        <div class="sm-block sfu" id="sfu-3">SFU</div>
+                    </div>
+                </div>
+            </div>
+            <div class="l1-cache-container bottom">
+                <div class="sm-block l1-cache" id="l1-shared-mem">192KB L1 Data Cache / Shared Memory</div>
+            </div>
+        </div>
+
+        <div class="code-container">
+            <pre><code id="code-display"></code></pre>
+        </div>
+    </div>
+
+    <div class="explanation-container">
+        <h3>指令解释</h3>
+        <p id="explanation-text">点击 "单步执行" 按钮开始可视化。</p>
+    </div>
+
+<script>
+// PTX Code is embedded here for simplicity
+const ptxCode = `
+// ... (The full PTX code from the user prompt goes here) ...
+//
+// Generated by NVIDIA NVVM Compiler
+//
+// Compiler Build ID: CL-32688072
+// Cuda compilation tools, release 12.1, V12.1.105
+// Based on NVVM 7.0.1
+//
+
+.version 8.1
+.target sm_75
+.address_size 64
+
+	// .globl	_Z19qk_transpose_kernelPKfS0_Pfii
+.extern .shared .align 16 .b8 s_data[];
+
+.visible .entry _Z19qk_transpose_kernelPKfS0_Pfii(
+	.param .u64 _Z19qk_transpose_kernelPKfS0_Pfii_param_0,
+	.param .u64 _Z19qk_transpose_kernelPKfS0_Pfii_param_1,
+	.param .u64 _Z19qk_transpose_kernelPKfS0_Pfii_param_2,
+	.param .u32 _Z19qk_transpose_kernelPKfS0_Pfii_param_3,
+	.param .u32 _Z19qk_transpose_kernelPKfS0_Pfii_param_4
+)
+{
+	.reg .pred 	%p<9>;
+	.reg .f32 	%f<33>;
+	.reg .b32 	%r<32>;
+	.reg .b64 	%rd<31>;
+
+
+	ld.param.u64 	%rd16, [_Z19qk_transpose_kernelPKfS0_Pfii_param_0];
+	ld.param.u64 	%rd17, [_Z19qk_transpose_kernelPKfS0_Pfii_param_1];
+	ld.param.u64 	%rd15, [_Z19qk_transpose_kernelPKfS0_Pfii_param_2];
+	ld.param.u32 	%r12, [_Z19qk_transpose_kernelPKfS0_Pfii_param_3];
+	ld.param.u32 	%r13, [_Z19qk_transpose_kernelPKfS0_Pfii_param_4];
+	cvta.to.global.u64 	%rd1, %rd17;
+	cvta.to.global.u64 	%rd2, %rd16;
+	mov.u32 	%r14, %ntid.y;
+	mov.u32 	%r15, %ctaid.y;
+	mov.u32 	%r16, %tid.y;
+	mad.lo.s32 	%r1, %r15, %r14, %r16;
+	mov.u32 	%r17, %ntid.x;
+	mov.u32 	%r18, %ctaid.x;
+	mov.u32 	%r19, %tid.x;
+	mad.lo.s32 	%r2, %r18, %r17, %r19;
+	setp.ge.s32 	%p1, %r1, %r12;
+	setp.ge.s32 	%p2, %r2, %r12;
+	or.pred  	%p3, %p1, %p2;
+	@%p3 bra 	$L__BB0_9;
+
+	setp.lt.s32 	%p4, %r13, 1;
+	mov.f32 	%f32, 0f00000000;
+	@%p4 bra 	$L__BB0_8;
+
+	add.s32 	%r21, %r13, -1;
+	and.b32  	%r31, %r13, 3;
+	setp.lt.u32 	%p5, %r21, 3;
+	mov.f32 	%f32, 0f00000000;
+	mov.u32 	%r30, 0;
+	@%p5 bra 	$L__BB0_5;
+
+	sub.s32 	%r29, %r13, %r31;
+	mul.lo.s32 	%r23, %r13, %r1;
+	mul.wide.s32 	%rd18, %r23, 4;
+	add.s64 	%rd19, %rd2, %rd18;
+	add.s64 	%rd28, %rd19, 8;
+	mul.lo.s32 	%r24, %r13, %r2;
+	mul.wide.s32 	%rd20, %r24, 4;
+	add.s64 	%rd21, %rd1, %rd20;
+	add.s64 	%rd27, %rd21, 8;
+
+$L__BB0_4:
+	ld.global.f32 	%f12, [%rd27+-8];
+	ld.global.f32 	%f13, [%rd28+-8];
+	fma.rn.f32 	%f14, %f13, %f12, %f32;
+	ld.global.f32 	%f15, [%rd27+-4];
+	ld.global.f32 	%f16, [%rd28+-4];
+	fma.rn.f32 	%f17, %f16, %f15, %f14;
+	ld.global.f32 	%f18, [%rd27];
+	ld.global.f32 	%f19, [%rd28];
+	fma.rn.f32 	%f20, %f19, %f18, %f17;
+	ld.global.f32 	%f21, [%rd27+4];
+	ld.global.f32 	%f22, [%rd28+4];
+	fma.rn.f32 	%f32, %f22, %f21, %f20;
+	add.s32 	%r30, %r30, 4;
+	add.s64 	%rd28, %rd28, 16;
+	add.s64 	%rd27, %rd27, 16;
+	add.s32 	%r29, %r29, -4;
+	setp.ne.s32 	%p6, %r29, 0;
+	@%p6 bra 	$L__BB0_4;
+
+$L__BB0_5:
+	setp.eq.s32 	%p7, %r31, 0;
+	@%p7 bra 	$L__BB0_8;
+
+	mad.lo.s32 	%r25, %r13, %r2, %r30;
+	mul.wide.s32 	%rd22, %r25, 4;
+	add.s64 	%rd30, %rd1, %rd22;
+	mad.lo.s32 	%r26, %r13, %r1, %r30;
+	mul.wide.s32 	%rd23, %r26, 4;
+	add.s64 	%rd29, %rd2, %rd23;
+
+$L__BB0_7:
+	.pragma "nounroll";
+	ld.global.f32 	%f23, [%rd30];
+	ld.global.f32 	%f24, [%rd29];
+	fma.rn.f32 	%f32, %f24, %f23, %f32;
+	add.s64 	%rd30, %rd30, 4;
+	add.s64 	%rd29, %rd29, 4;
+	add.s32 	%r31, %r31, -1;
+	setp.ne.s32 	%p8, %r31, 0;
+	@%p8 bra 	$L__BB0_7;
+
+$L__BB0_8:
+	cvt.rn.f32.s32 	%f25, %r13;
+	rsqrt.approx.f32 	%f26, %f25;
+	mul.f32 	%f27, %f32, %f26;
+	mad.lo.s32 	%r27, %r1, %r12, %r2;
+	cvta.to.global.u64 	%rd24, %rd15;
+	mul.wide.s32 	%rd25, %r27, 4;
+	add.s64 	%rd26, %rd24, %rd25;
+	st.global.f32 	[%rd26], %f27;
+
+$L__BB0_9:
+	ret;
+
+}
+	// .globl	_Z14softmax_kernelPfi
+.visible .entry _Z14softmax_kernelPfi(
+	.param .u64 _Z14softmax_kernelPfi_param_0,
+	.param .u32 _Z14softmax_kernelPfi_param_1
+)
+{
+	.reg .pred 	%p<13>;
+	.reg .f32 	%f<44>;
+	.reg .b32 	%r<37>;
+	.reg .b64 	%rd<9>;
+
+
+	ld.param.u64 	%rd2, [_Z14softmax_kernelPfi_param_0];
+	ld.param.u32 	%r20, [_Z14softmax_kernelPfi_param_1];
+	cvta.to.global.u64 	%rd1, %rd2;
+	mov.u32 	%r1, %ctaid.x;
+	mov.u32 	%r36, %tid.x;
+	setp.lt.s32 	%p1, %r36, %r20;
+	@%p1 bra 	$L__BB1_2;
+	bra.uni 	$L__BB1_1;
+
+$L__BB1_2:
+	mul.lo.s32 	%r3, %r1, %r20;
+	mov.f32 	%f41, 0fFF7FFFFF;
+	mov.u32 	%r4, %ntid.x;
+	mov.u32 	%r32, %r36;
+
+$L__BB1_3:
+	add.s32 	%r21, %r32, %r3;
+	mul.wide.s32 	%rd3, %r21, 4;
+	add.s64 	%rd4, %rd1, %rd3;
+	ld.global.f32 	%f11, [%rd4];
+	max.f32 	%f41, %f41, %f11;
+	add.s32 	%r32, %r32, %r4;
+	setp.lt.s32 	%p2, %r32, %r20;
+	@%p2 bra 	$L__BB1_3;
+	bra.uni 	$L__BB1_4;
+
+$L__BB1_1:
+	mov.f32 	%f41, 0fFF7FFFFF;
+
+$L__BB1_4:
+	shl.b32 	%r22, %r36, 2;
+	mov.u32 	%r23, s_data;
+	add.s32 	%r7, %r23, %r22;
+	st.shared.f32 	[%r7], %f41;
+	bar.sync 	0;
+	mov.u32 	%r8, %ntid.x;
+	shr.u32 	%r35, %r8, 1;
+	setp.eq.s32 	%p3, %r35, 0;
+	@%p3 bra 	$L__BB1_9;
+
+	mov.u32 	%r33, %r35;
+
+$L__BB1_6:
+	setp.ge.u32 	%p4, %r36, %r33;
+	@%p4 bra 	$L__BB1_8;
+
+	ld.shared.f32 	%f12, [%r7];
+	shl.b32 	%r24, %r33, 2;
+	add.s32 	%r25, %r7, %r24;
+	ld.shared.f32 	%f13, [%r25];
+	max.f32 	%f14, %f12, %f13;
+	st.shared.f32 	[%r7], %f14;
+
+$L__BB1_8:
+	bar.sync 	0;
+	shr.u32 	%r33, %r33, 1;
+	setp.ne.s32 	%p5, %r33, 0;
+	@%p5 bra 	$L__BB1_6;
+
+$L__BB1_9:
+	setp.ge.s32 	%p6, %r36, %r20;
+	mov.f32 	%f43, 0f00000000;
+	@%p6 bra 	$L__BB1_12;
+
+	ld.shared.f32 	%f4, [s_data];
+	mul.lo.s32 	%r12, %r1, %r20;
+	mov.u32 	%r34, %r36;
+
+$L__BB1_11:
+	add.s32 	%r26, %r34, %r12;
+	mul.wide.s32 	%rd5, %r26, 4;
+	add.s64 	%rd6, %rd1, %rd5;
+	ld.global.f32 	%f17, [%rd6];
+	sub.f32 	%f18, %f17, %f4;
+	mov.f32 	%f19, 0f3F000000;
+	mov.f32 	%f20, 0f3BBB989D;
+	fma.rn.f32 	%f21, %f18, %f20, %f19;
+	mov.f32 	%f22, 0f3FB8AA3B;
+	mov.f32 	%f23, 0f437C0000;
+	cvt.sat.f32.f32 	%f24, %f21;
+	mov.f32 	%f25, 0f4B400001;
+	fma.rm.f32 	%f26, %f24, %f23, %f25;
+	add.f32 	%f27, %f26, 0fCB40007F;
+	neg.f32 	%f28, %f27;
+	fma.rn.f32 	%f29, %f18, %f22, %f28;
+	mov.f32 	%f30, 0f32A57060;
+	fma.rn.f32 	%f31, %f18, %f30, %f29;
+	mov.b32 	%r27, %f26;
+	shl.b32 	%r28, %r27, 23;
+	mov.b32 	%f32, %r28;
+	ex2.approx.ftz.f32 	%f33, %f31;
+	mul.f32 	%f34, %f33, %f32;
+	add.f32 	%f43, %f43, %f34;
+	st.global.f32 	[%rd6], %f34;
+	add.s32 	%r34, %r34, %r8;
+	setp.lt.s32 	%p7, %r34, %r20;
+	@%p7 bra 	$L__BB1_11;
+
+$L__BB1_12:
+	st.shared.f32 	[%r7], %f43;
+	bar.sync 	0;
+	@%p3 bra 	$L__BB1_17;
+
+$L__BB1_14:
+	setp.ge.u32 	%p9, %r36, %r35;
+	@%p9 bra 	$L__BB1_16;
+
+	shl.b32 	%r29, %r35, 2;
+	add.s32 	%r30, %r7, %r29;
+	ld.shared.f32 	%f35, [%r7];
+	ld.shared.f32 	%f36, [%r30];
+	add.f32 	%f37, %f36, %f35;
+	st.shared.f32 	[%r7], %f37;
+
+$L__BB1_16:
+	bar.sync 	0;
+	shr.u32 	%r35, %r35, 1;
+	setp.ne.s32 	%p10, %r35, 0;
+	@%p10 bra 	$L__BB1_14;
+
+$L__BB1_17:
+	@%p6 bra 	$L__BB1_20;
+
+	ld.shared.f32 	%f8, [s_data];
+	mul.lo.s32 	%r17, %r1, %r20;
+
+$L__BB1_19:
+	add.s32 	%r31, %r36, %r17;
+	mul.wide.s32 	%rd7, %r31, 4;
+	add.s64 	%rd8, %rd1, %rd7;
+	ld.global.f32 	%f38, [%rd8];
+	div.rn.f32 	%f39, %f38, %f8;
+	st.global.f32 	[%rd8], %f39;
+	add.s32 	%r36, %r36, %r8;
+	setp.lt.s32 	%p12, %r36, %r20;
+	@%p12 bra 	$L__BB1_19;
+
+$L__BB1_20:
+	ret;
+
+}
+	// .globl	_Z9pv_kernelPKfS0_Pfii
+.visible .entry _Z9pv_kernelPKfS0_Pfii(
+	.param .u64 _Z9pv_kernelPKfS0_Pfii_param_0,
+	.param .u64 _Z9pv_kernelPKfS0_Pfii_param_1,
+	.param .u64 _Z9pv_kernelPKfS0_Pfii_param_2,
+	.param .u32 _Z9pv_kernelPKfS0_Pfii_param_3,
+	.param .u32 _Z9pv_kernelPKfS0_Pfii_param_4
+)
+{
+	.reg .pred 	%p<9>;
+	.reg .f32 	%f<30>;
+	.reg .b32 	%r<31>;
+	.reg .b64 	%rd<35>;
+
+
+	ld.param.u64 	%rd18, [_Z9pv_kernelPKfS0_Pfii_param_0];
+	ld.param.u64 	%rd19, [_Z9pv_kernelPKfS0_Pfii_param_1];
+	ld.param.u64 	%rd17, [_Z9pv_kernelPKfS0_Pfii_param_2];
+	ld.param.u32 	%r12, [_Z9pv_kernelPKfS0_Pfii_param_3];
+	ld.param.u32 	%r13, [_Z9pv_kernelPKfS0_Pfii_param_4];
+	cvta.to.global.u64 	%rd1, %rd19;
+	cvta.to.global.u64 	%rd2, %rd18;
+	mov.u32 	%r14, %ntid.y;
+	mov.u32 	%r15, %ctaid.y;
+	mov.u32 	%r16, %tid.y;
+	mad.lo.s32 	%r1, %r15, %r14, %r16;
+	mov.u32 	%r17, %ntid.x;
+	mov.u32 	%r18, %ctaid.x;
+	mov.u32 	%r19, %tid.x;
+	mad.lo.s32 	%r2, %r18, %r17, %r19;
+	setp.ge.s32 	%p1, %r1, %r12;
+	setp.ge.s32 	%p2, %r2, %r13;
+	or.pred  	%p3, %p1, %p2;
+	@%p3 bra 	$L__BB2_9;
+
+	setp.lt.s32 	%p4, %r12, 1;
+	mov.f32 	%f29, 0f00000000;
+	@%p4 bra 	$L__BB2_8;
+
+	add.s32 	%r21, %r12, -1;
+	and.b32  	%r30, %r12, 3;
+	setp.lt.u32 	%p5, %r21, 3;
+	mov.f32 	%f29, 0f00000000;
+	mov.u32 	%r29, 0;
+	@%p5 bra 	$L__BB2_5;
+
+	sub.s32 	%r28, %r12, %r30;
+	mul.wide.s32 	%rd20, %r2, 4;
+	add.s64 	%rd32, %rd1, %rd20;
+	mul.lo.s32 	%r23, %r12, %r1;
+	mul.wide.s32 	%rd21, %r23, 4;
+	add.s64 	%rd22, %rd2, %rd21;
+	add.s64 	%rd31, %rd22, 8;
+	mul.wide.s32 	%rd5, %r13, 4;
+
+$L__BB2_4:
+	ld.global.f32 	%f12, [%rd32];
+	ld.global.f32 	%f13, [%rd31+-8];
+	fma.rn.f32 	%f14, %f13, %f12, %f29;
+	add.s64 	%rd23, %rd32, %rd5;
+	ld.global.f32 	%f15, [%rd23];
+	ld.global.f32 	%f16, [%rd31+-4];
+	fma.rn.f32 	%f17, %f16, %f15, %f14;
+	add.s64 	%rd24, %rd23, %rd5;
+	ld.global.f32 	%f18, [%rd24];
+	ld.global.f32 	%f19, [%rd31];
+	fma.rn.f32 	%f20, %f19, %f18, %f17;
+	add.s64 	%rd25, %rd24, %rd5;
+	add.s64 	%rd32, %rd25, %rd5;
+	ld.global.f32 	%f21, [%rd25];
+	ld.global.f32 	%f22, [%rd31+4];
+	fma.rn.f32 	%f29, %f22, %f21, %f20;
+	add.s32 	%r29, %r29, 4;
+	add.s64 	%rd31, %rd31, 16;
+	add.s32 	%r28, %r28, -4;
+	setp.ne.s32 	%p6, %r28, 0;
+	@%p6 bra 	$L__BB2_4;
+
+$L__BB2_5:
+	setp.eq.s32 	%p7, %r30, 0;
+	@%p7 bra 	$L__BB2_8;
+
+	mad.lo.s32 	%r24, %r29, %r13, %r2;
+	mul.wide.s32 	%rd26, %r24, 4;
+	add.s64 	%rd34, %rd1, %rd26;
+	mul.wide.s32 	%rd11, %r13, 4;
+	mad.lo.s32 	%r25, %r12, %r1, %r29;
+	mul.wide.s32 	%rd27, %r25, 4;
+	add.s64 	%rd33, %rd2, %rd27;
+
+$L__BB2_7:
+	.pragma "nounroll";
+	ld.global.f32 	%f23, [%rd34];
+	ld.global.f32 	%f24, [%rd33];
+	fma.rn.f32 	%f32, %f24, %f23, %f29;
+	add.s64 	%rd34, %rd34, %rd11;
+	add.s64 	%rd33, %rd33, 4;
+	add.s32 	%r30, %r30, -1;
+	setp.ne.s32 	%p8, %r30, 0;
+	@%p8 bra 	$L__BB2_7;
+
+$L__BB2_8:
+	mad.lo.s32 	%r26, %r1, %r13, %r2;
+	cvta.to.global.u64 	%rd28, %rd17;
+	mul.wide.s32 	%rd29, %r26, 4;
+	add.s64 	%rd30, %rd28, %rd29;
+	st.global.f32 	[%rd30], %f29;
+
+$L__BB2_9:
+	ret;
+
+}
+`;
+
+const codeDisplay = document.getElementById('code-display');
+const explanationText = document.getElementById('explanation-text');
+const kernelSelect = document.getElementById('kernel-select');
+const stepBtn = document.getElementById('step-btn');
+const resetBtn = document.getElementById('reset-btn');
+
+let allLines = [];
+let currentLineIndex = 0;
+let kernelBoundaries = {};
+
+function parsePtx() {
+    const lines = ptxCode.split('\n');
+    let currentKernel = null;
+    lines.forEach((line, index) => {
+        if (line.includes('.visible .entry')) {
+            const kernelName = line.match(/_Z\w+/)[0].replace(/_param_.$/, '');
+            currentKernel = kernelSelect.options[Object.keys(kernelBoundaries).length].value;
+            kernelBoundaries[currentKernel] = { start: index, end: 0, name: kernelName };
+        } else if (line.trim() === '}' && currentKernel) {
+            kernelBoundaries[currentKernel].end = index;
+            currentKernel = null;
+        }
+    });
+}
+
+function loadKernel(kernelName) {
+    const { start, end } = kernelBoundaries[kernelName];
+    allLines = ptxCode.split('\n').slice(start, end + 1);
+    codeDisplay.innerHTML = allLines.map(line => `<span class="code-line">${line.replace(/</g, '&lt;').replace(/>/g, '&gt;')}</span>`).join('');
+    currentLineIndex = 0;
+    resetHighlights();
+    explanationText.textContent = `已加载核函数 ${kernelBoundaries[kernelName].name}。请点击 "单步执行"。`;
+}
+
+function resetHighlights() {
+    document.querySelectorAll('.highlight, .highlight-tensor-simulation').forEach(el => {
+        el.classList.remove('highlight', 'highlight-tensor-simulation');
+    });
+    document.querySelectorAll('.highlight-code').forEach(el => el.classList.remove('highlight-code'));
+}
+
+function highlightUnits(units, className = 'highlight') {
+    units.forEach(unitId => {
+        const element = document.getElementById(unitId);
+        if (element) {
+            element.classList.add(className);
+        }
+    });
+}
+
+function getInstructionInfo(line) {
+    line = line.trim().toLowerCase();
+    const pIdx = '0'; // We'll always highlight units in the first partition for simplicity
+
+    // Memory Operations
+    if (line.startsWith('ld.global')) return { units: [`ld-st-${pIdx}-0`, `ld-st-${pIdx}-1`, `register-file-${pIdx}`, 'l1-shared-mem'], desc: '从全局内存加载 (ld.global)。数据通过L1/L2缓存，由LD/ST单元处理，最终存入寄存器文件。' };
+    if (line.startsWith('st.global')) return { units: [`ld-st-${pIdx}-0`, `ld-st-${pIdx}-1`, `register-file-${pIdx}`, 'l1-shared-mem'], desc: '向全局内存存储 (st.global)。数据从寄存器文件读取，由LD/ST单元处理，通过L1/L2缓存写入内存。' };
+    if (line.startsWith('ld.shared')) return { units: [`ld-st-${pIdx}-0`, `register-file-${pIdx}`, 'l1-shared-mem'], desc: '从共享内存加载 (ld.shared)。这是一个快速的片上内存访问，由LD/ST单元执行。' };
+    if (line.startsWith('st.shared')) return { units: [`ld-st-${pIdx}-0`, `register-file-${pIdx}`, 'l1-shared-mem'], desc: '向共享内存存储 (st.shared)。由LD/ST单元执行，将寄存器数据写入片上共享内存。' };
+    if (line.startsWith('ld.param')) return { units: [`ld-st-${pIdx}-0`, `register-file-${pIdx}`], desc: '加载核函数参数 (ld.param)。参数从常量内存或全局内存中加载到寄存器中。' };
+
+    // Floating Point Operations
+    if (line.startsWith('fma.')) return { 
+        units: [`fp32-${pIdx}-0`, `fp32-${pIdx}-1`, `register-file-${pIdx}`], 
+        simulated_units: [`tensor-core-${pIdx}`],
+        desc: '执行融合乘加 (FMA)。此指令由FP32单元执行。<b>同时，模拟高亮Tensor Core</b>以演示：若代码使用半精度(FP16/BF16)并调用专用API，硬件会使用Tensor Core以极高效率完成类似运算，生成`mma.sync`指令。' 
+    };
+    if (line.match(/^(mul|add|sub|max|neg)\.f32/)) return { units: [`fp32-${pIdx}-2`, `fp32-${pIdx}-3`, `register-file-${pIdx}`], desc: '执行基础32位浮点运算 (add/mul/sub/max)。这些指令由FP32算术逻辑单元处理。' };
+
+    // Integer Operations
+    if (line.match(/^(mad|add|sub|mul|mov|and|or|shl|shr|setp)\.(s32|u32|b32|s64|u64|pred)/) || line.startsWith('mov.u32') || line.startsWith('mov.b32')) return { units: [`int32-${pIdx}-0`, `int32-${pIdx}-1`, `register-file-${pIdx}`], desc: '执行整数或位运算 (mad/add/mov/setp等)。这些指令由INT32单元处理，用于地址计算、循环计数和逻辑判断。' };
+
+    // Special Function & Conversion
+    if (line.startsWith('rsqrt.approx')) return { units: [`sfu-${pIdx}`, `register-file-${pIdx}`], desc: '计算平方根倒数的近似值 (rsqrt.approx)。这是一个特殊函数，由SFU（特殊函数单元）高效执行。' };
+    if (line.startsWith('ex2.approx')) return { units: [`sfu-${pIdx}`, `register-file-${pIdx}`], desc: '计算2的指数次方的近似值 (ex2.approx)。由SFU执行，常用于实现exp()函数。' };
+    if (line.startsWith('div.')) return { units: [`fp32-${pIdx}-4`, `sfu-${pIdx}`, `register-file-${pIdx}`], desc: '执行浮点除法 (div)。根据架构不同，可能由FP32单元或SFU处理，通常比乘法慢。' };
+    if (line.startsWith('cvt.')) return { units: [`fp32-${pIdx}-5`, `int32-${pIdx}-2`, `register-file-${pIdx}`], desc: '执行类型转换 (cvt)。例如，在整数和浮点数之间转换，会动用相应的计算单元。' };
+
+    // Control Flow
+    if (line.match(/^@\%p\d+ bra/) || line.startsWith('bra.uni')) return { units: [`warp-scheduler-${pIdx}`, `dispatch-unit-${pIdx}`], desc: '执行分支指令 (bra)。Warp调度器根据断言（predicate）寄存器的值决定下一条指令的地址，控制执行流。' };
+    if (line.startsWith('ret')) return { units: [`warp-scheduler-${pIdx}`], desc: '从核函数返回 (ret)。Warp调度器结束当前线程束的执行。' };
+    if (line.startsWith('bar.sync')) return { units: [`warp-scheduler-${pIdx}`, 'l1-shared-mem'], desc: '线程块内同步 (bar.sync)。Warp调度器暂停执行，直到块内所有线程都到达此同步点，确保内存操作的可见性。' };
+
+    return null;
+}
+
+function step() {
+    let info = null;
+    let lineToExecute = '';
+    
+    // Find the next executable line
+    while (currentLineIndex < allLines.length) {
+        lineToExecute = allLines[currentLineIndex].trim();
+        if (lineToExecute && !lineToExecute.startsWith('//') && !lineToExecute.startsWith('.') && !lineToExecute.startsWith('{') && !lineToExecute.startsWith('}') && !lineToExecute.startsWith('$L')) {
+            info = getInstructionInfo(lineToExecute);
+            if (info) break;
+        }
+        currentLineIndex++;
+    }
+
+    if (currentLineIndex >= allLines.length) {
+        explanationText.innerHTML = "核函数执行完毕。";
+        resetHighlights();
+        return;
+    }
+
+    resetHighlights();
+
+    // Highlight code line
+    const codeLines = document.querySelectorAll('#code-display .code-line');
+    codeLines[currentLineIndex].classList.add('highlight-code');
+    codeLines[currentLineIndex].scrollIntoView({ behavior: 'smooth', block: 'center' });
+
+    // Highlight SM units and show explanation
+    if (info) {
+        highlightUnits(info.units);
+        if (info.simulated_units) {
+            highlightUnits(info.simulated_units, 'highlight-tensor-simulation');
+        }
+        explanationText.innerHTML = info.desc;
+    } else {
+        explanationText.innerHTML = `无法解析指令: ${lineToExecute}`;
+    }
+
+    currentLineIndex++;
+}
+
+// Initial setup
+parsePtx();
+loadKernel(kernelSelect.value);
+
+kernelSelect.addEventListener('change', (e) => loadKernel(e.target.value));
+stepBtn.addEventListener('click', step);
+resetBtn.addEventListener('click', () => loadKernel(kernelSelect.value));
+
+</script>
+</body>
+</html>
