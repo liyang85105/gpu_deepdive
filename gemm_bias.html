@@ -1,0 +1,348 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>A100 架构与 Tiled GEMM Kernel 执行模拟</title>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Roboto:wght@300;400;700&display=swap');
+        :root {
+            --nvidia-green: #76b900;
+            --highlight-glow: #8cff00;
+            --highlight-orange: #f79646;
+            --dark-bg: #1a1d21;
+            --panel-bg: #25282e;
+            --text-color: #ffffff;
+            --border-color: #4a4a4a;
+            --l2-cache-blue: #6cace4;
+            --sm-blue: #4f81bd;
+        }
+        body { font-family: 'Roboto', sans-serif; background-color: var(--dark-bg); color: var(--text-color); display: flex; justify-content: center; padding: 20px; }
+        .main-container { display: flex; width: 100%; max-width: 2400px; gap: 20px; }
+        .code-panel { flex: 0.6; background-color: var(--panel-bg); border-radius: 10px; padding: 25px; display: flex; flex-direction: column; border-top: 4px solid var(--nvidia-green); }
+        .gpu-panel { flex: 1.4; display: flex; flex-direction: column; gap: 20px; }
+        .vis-panel { background-color: var(--panel-bg); border-radius: 10px; padding: 25px; }
+        h2, h3 { color: var(--nvidia-green); border-bottom: 1px solid var(--border-color); padding-bottom: 10px; margin-top: 0; font-weight: 400; }
+        
+        /* --- Code Panel --- */
+        pre { background-color: #1e1e1e; color: #d4d4d4; padding: 15px; border-radius: 5px; font-size: 14px; line-height: 1.8; white-space: pre-wrap; margin-bottom: 15px; }
+        .code-line { display: block; transition: background-color 0.3s ease; padding: 2px 5px; border-radius: 3px; }
+        .code-line.highlight { background-color: rgba(118, 185, 0, 0.3); }
+        .code-comment { color: #6a9955; }
+        #explanation { padding: 15px; background-color: rgba(0,0,0,0.2); border-left: 4px solid var(--nvidia-green); min-height: 80px; line-height: 1.6; flex-grow: 1; }
+        #controls { display: flex; gap: 15px; margin-top: auto; padding-top: 20px;}
+        .nav-btn { padding: 10px 20px; font-size: 16px; cursor: pointer; border: 1px solid var(--nvidia-green); border-radius: 5px; background-color: transparent; color: var(--nvidia-green); transition: all 0.3s; }
+        .nav-btn:hover:not(:disabled) { background-color: var(--nvidia-green); color: white; }
+        .nav-btn:disabled { border-color: #555; color: #555; cursor: not-allowed; }
+
+        /* --- GPU Panel: Chip View --- */
+        #chip-top-io { display: flex; flex-direction: column; gap: 5px; margin-bottom: 10px; }
+        #global-chip-view { display: flex; justify-content: center; align-items: stretch; gap: 10px; }
+        .side-column { display: flex; flex-direction: column; justify-content: space-around; gap: 10px; }
+        .hbm-mem-pair { display: flex; gap: 5px; align-items: stretch; }
+        .mem-controller-stack { display: flex; flex-direction: column; gap: 5px; flex-grow: 1; justify-content: space-around; }
+        .hbm-arrow-stack { display: flex; flex-direction: column; justify-content: space-around; padding: 0 4px; }
+        .hbm-arrow { font-size: 20px; color: white; }
+        #chip-center-die { flex-grow: 1; display: grid; grid-template-rows: 1fr auto 1fr; gap: 10px; min-width: 800px; }
+        .chip-component { background-color: #3e3e3e; border: 1px solid var(--border-color); color: white; font-size: 12px; text-align: center; border-radius: 6px; display: flex; align-items: center; justify-content: center; position: relative; }
+        .hbm-stack { padding: 15px 10px; }
+        .mem-controller { padding: 10px; flex-grow: 1; }
+        .pcie-header { font-weight: bold; padding: 10px; }
+        .giga-engine { background-color: var(--highlight-orange); font-weight: bold; padding: 10px; }
+        .gpc-row { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; align-items: stretch; }
+        .gpc { border: 2px solid #555; background-color: #383838; padding: 4px; display: flex; justify-content: space-around; align-items: stretch; gap: 3px; }
+        .tpc-unit { display: flex; flex-direction: column; gap: 3px; flex: 1; }
+        .sm-unit { background-color: var(--sm-blue); border-radius: 3px; border: 1px solid #383838; flex-grow: 1; color: white; font-size: 11px; font-weight: bold; display: flex; align-items: center; justify-content: center; transition: all 0.2s ease; }
+        .sm-unit.scheduled { background-color: var(--highlight-orange); box-shadow: 0 0 8px 2px var(--highlight-orange); z-index: 10; transform: scale(1.05); }
+        .l2-cache-area { display: flex; gap: 10px; }
+        .l2-cache { background-color: var(--l2-cache-blue); padding: 20px; font-weight: bold; color: white; flex-grow: 1;}
+        .l2-connector { width: 25px; background-color: #3e3e3e; }
+        #chip-bottom-io { display: flex; flex-direction: column; margin-top: 10px; }
+        .high-speed-hub { background-color: #999; justify-content: center; padding: 8px; font-weight: bold; color: white; }
+        .nvlink-arrows-container { display: flex; justify-content: space-around; padding: 2px 0; }
+        .nvlink-arrows-container span { color: white; font-size: 16px; }
+        .nvlink-row-distributed { display: flex; gap: 5px; }
+        .nvlink-block { background-color: var(--nvidia-green); font-weight: bold; padding: 10px; flex-grow: 1; color: white; }
+
+        /* --- SM View & Highlighting --- */
+        #sm-container { background-color: #363636; padding: 5px; border-radius: 8px; border: 1px solid var(--border-color); display: flex; flex-direction: column; gap: 5px; }
+        .sm-title-bar, .sm-header-bar, .sm-l1d-cache-bar { background-color: #4f81bd; color: white; text-align: center; font-weight: bold; padding: 8px; border-radius: 4px; }
+        .sm-title-bar { background-color: #333; font-size: 16px; }
+        .sm-tex-bar { display: flex; gap: 5px; }
+        .sm-tex-bar > div { background-color: #4f81bd; color: white; text-align: center; font-weight: bold; padding: 8px; flex-grow: 1; border-radius: 4px; }
+        .sm-main-grid { display: grid; grid-template-columns: 1fr 1fr; grid-template-rows: 1fr 1fr; gap: 5px; }
+        .sm-quadrant { background-color: #4a4a4a; padding: 5px; display: flex; flex-direction: column; gap: 3px; border-radius: 4px; }
+        .sm-component {
+            color: white; font-weight: bold; text-align: center; padding: 4px; font-size: 10px;
+            border-radius: 3px; transition: all 0.2s ease-in-out; position: relative;
+            display: flex; align-items: center; justify-content: center;
+        }
+        .sm-l0-cache { background-color: #4f81bd; }
+        .sm-warp-scheduler { background-color: #f79646; }
+        .sm-dispatch-unit { background-color: #c0504d; }
+        .sm-register-file { background-color: #4bacc6; padding: 8px; font-size: 9px; }
+        .sm-core-area { display: flex; gap: 3px; flex-grow: 1; }
+        .sm-core-cluster { display: flex; gap: 3px; flex: 3; }
+        .sm-core-column { display: flex; flex-direction: column; gap: 2px; flex: 1; }
+        .sm-core-sub-column { display: flex; gap: 2px; }
+        .sm-core-unit { font-size: 8px; padding: 2px; border-radius: 2px; flex-grow: 1; }
+        .sm-core-int32 { background-color: #92d050; }
+        .sm-core-fp32 { background-color: #9bbb59; }
+        .sm-core-fp64 { background-color: #77933c; }
+        .sm-tensor-core { background-color: #77933c; flex: 2; font-size: 12px; }
+        .sm-bottom-units { display: flex; gap: 2px; }
+        .sm-ld-st { background-color: #d99694; flex-basis: 0; flex-grow: 1; font-size: 9px; padding: 4px; }
+        .sm-sfu { background-color: #c0504d; flex-basis: 0; flex-grow: 1.5; font-size: 11px; }
+        .sm-component.active::after, .chip-component.active::after {
+            content: '';
+            position: absolute;
+            top: -2px; left: -2px; right: -2px; bottom: -2px;
+            border: 2px solid var(--highlight-glow);
+            box-shadow: 0 0 8px var(--highlight-glow);
+            pointer-events: none;
+            border-radius: inherit;
+        }
+    </style>
+</head>
+<body>
+
+<div class="main-container">
+
+    <div class="code-panel">
+        <h2>Tiled GEMM + Bias Kernel</h2>
+        <pre><code id="ptx-code">
+<span class="code-line" data-step="1"><span class="code-comment">// -- 外层循环: 遍历输出矩阵 C 的分块 --</span></span>
+<span class="code-line" data-step="2">ld.global.matrix A_tile, B_tile</span>
+<span class="code-line" data-step="3"><span class="code-comment">// -- 内层循环: 沿 K 维度累加 --</span></span>
+<span class="code-line" data-step="4">ld.shared.matrix A_reg, B_reg</span>
+<span class="code-line" data-step="5">mma.sync C_acc, A_reg, B_reg</span>
+<span class="code-line" data-step="6"><span class="code-comment">// -- 内层循环结束 --</span></span>
+<span class="code-line" data-step="7">st.global C_tile &lt;- C_acc</span>
+<span class="code-line" data-step="8"><span class="code-comment">// -- (融合操作) --</span></span>
+<span class="code-line" data-step="9">ld.global bias_vec</span>
+<span class="code-line" data-step="10">add.f32 C_tile, bias_vec</span>
+</code></pre>
+        <div id="explanation">
+            <h3>执行解析</h3>
+            <p id="explanation-text">点击“下一步”开始模拟一个 Tiled GEMM Kernel 在 A100 上的执行流程。</p>
+        </div>
+        <div id="controls">
+            <button id="prev-btn" class="nav-btn" disabled>上一步</button>
+            <button id="next-btn" class="nav-btn">下一步</button>
+        </div>
+    </div>
+
+    <div class="gpu-panel">
+        <div class="vis-panel">
+            <h3>芯片全局视图 (示意图)</h3>
+            <div id="chip-top-io">
+                <div class="chip-component pcie-header">PCI Express 4.0 Host Interface</div>
+                <div class="chip-component giga-engine">GigaThread Engine with MIG Control</div>
+            </div>
+            <div id="global-chip-view">
+                <div class="side-column" id="left-side-column"></div>
+                <div id="chip-center-die"></div>
+                <div class="side-column" id="right-side-column"></div>
+            </div>
+            <div id="chip-bottom-io">
+                <div class="chip-component high-speed-hub">High-Speed Hub</div>
+                <div class="nvlink-arrows-container" id="nvlink-arrows"></div>
+                <div class="nvlink-row-distributed" id="nvlink-blocks"></div>
+            </div>
+        </div>
+
+        <div class="vis-panel">
+            <h3>SM 内部结构 (精确布局)</h3>
+            <div id="sm-container"></div>
+        </div>
+    </div>
+</div>
+
+<script>
+document.addEventListener('DOMContentLoaded', () => {
+    let smElements = [];
+    
+    function createGpc() {
+        const gpc = document.createElement('div');
+        gpc.className = 'gpc';
+        for (let i = 0; i < 8; i++) {
+            const tpcUnit = document.createElement('div');
+            tpcUnit.className = 'tpc-unit';
+            const sm1 = document.createElement('div');
+            sm1.className = 'sm-unit';
+            sm1.textContent = 'SM';
+            tpcUnit.appendChild(sm1);
+            smElements.push(sm1);
+            const sm2 = document.createElement('div');
+            sm2.className = 'sm-unit';
+            sm2.textContent = 'SM';
+            tpcUnit.appendChild(sm2);
+            smElements.push(sm2);
+            gpc.appendChild(tpcUnit);
+        }
+        return gpc;
+    }
+    
+    const chipCenterDie = document.getElementById('chip-center-die');
+    chipCenterDie.innerHTML = `
+        <div class="gpc-row" id="top-gpc-row"></div>
+        <div class="l2-cache-area">
+            <div class="l2-cache chip-component">L2 Cache</div>
+            <div class="l2-connector chip-component"></div>
+            <div class="l2-cache chip-component">L2 Cache</div>
+        </div>
+        <div class="gpc-row" id="bottom-gpc-row"></div>`;
+        
+    const topGpcRow = document.getElementById('top-gpc-row'), bottomGpcRow = document.getElementById('bottom-gpc-row');
+    for(let i=0; i<4; i++) topGpcRow.appendChild(createGpc());
+    for(let i=0; i<4; i++) bottomGpcRow.appendChild(createGpc());
+
+    const leftSide = document.getElementById('left-side-column'), rightSide = document.getElementById('right-side-column');
+    let leftHtml = '', rightHtml = '';
+    const mcStackHtml = `<div class="mem-controller-stack">
+                            <div class="chip-component mem-controller">Memory Controller</div>
+                            <div class="chip-component mem-controller">Memory Controller</div>
+                         </div>`;
+    const arrowStackHtml = `<div class="hbm-arrow-stack">
+                                <div class="hbm-arrow">&#x2194;</div>
+                                <div class="hbm-arrow">&#x2194;</div>
+                            </div>`; 
+    for(let i=0; i<3; i++) {
+        leftHtml += `<div class="hbm-mem-pair">
+                        <div class="chip-component hbm-stack">HBM2</div>
+                        ${arrowStackHtml}
+                        ${mcStackHtml}
+                     </div>`;
+        rightHtml += `<div class="hbm-mem-pair">
+                        ${mcStackHtml}
+                        ${arrowStackHtml}
+                        <div class="chip-component hbm-stack">HBM2</div>
+                      </div>`;
+    }
+    leftSide.innerHTML = leftHtml;
+    rightSide.innerHTML = rightHtml;
+    
+    const nvlinkArrowsContainer = document.getElementById('nvlink-arrows');
+    const nvlinkBlocksContainer = document.getElementById('nvlink-blocks');
+    let arrowsHtml = '', blocksHtml = '';
+    for (let i = 0; i < 12; i++) {
+        arrowsHtml += '<span>&#x2195;</span>';
+        blocksHtml += '<div class="chip-component nvlink-block">NVLink</div>';
+    }
+    nvlinkArrowsContainer.innerHTML = arrowsHtml;
+    nvlinkBlocksContainer.innerHTML = blocksHtml;
+
+    function buildFullSmView() {
+        const smContainer = document.getElementById('sm-container');
+
+        const quadrantTemplate = `
+            <div class="sm-quadrant">
+                <div class="sm-component sm-l0-cache">L0 Instruction Cache</div>
+                <div class="sm-component sm-warp-scheduler">Warp Scheduler</div>
+                <div class="sm-component sm-dispatch-unit">Dispatch Unit</div>
+                <div class="sm-component sm-register-file">Register File</div>
+                <div class="sm-core-area">
+                    <div class="sm-core-cluster">
+                        <div class="sm-core-column">
+                            ${Array(8).fill(`
+                                <div class="sm-core-sub-column">
+                                    <div class="sm-component sm-core-unit sm-core-int32">INT32</div>
+                                    <div class="sm-component sm-core-unit sm-core-int32">INT32</div>
+                                </div>
+                            `).join('')}
+                        </div>
+                        <div class="sm-core-column">
+                            ${Array(8).fill(`
+                                <div class="sm-core-sub-column">
+                                    <div class="sm-component sm-core-unit sm-core-fp32">FP32</div>
+                                    <div class="sm-component sm-core-unit sm-core-fp32">FP32</div>
+                                </div>
+                            `).join('')}
+                        </div>
+                        <div class="sm-core-column">
+                            ${Array(8).fill('<div class="sm-component sm-core-unit sm-core-fp64">FP64</div>').join('')}
+                        </div>
+                    </div>
+                    <div class="sm-component sm-tensor-core">TENSOR CORE</div>
+                </div>
+                <div class="sm-bottom-units">
+                    ${Array(8).fill('<div class="sm-component sm-ld-st">LD/ST</div>').join('')}
+                    <div class="sm-component sm-sfu">SFU</div>
+                </div>
+            </div>
+        `;
+
+        smContainer.innerHTML = `
+            <div class="sm-title-bar">SM</div>
+            <div class="sm-header-bar">L1 Instruction Cache</div>
+            <div class="sm-main-grid">
+                ${quadrantTemplate.repeat(4)}
+            </div>
+            <div class="sm-l1d-cache-bar">192KB L1 Data Cache / Shared Memory</div>
+            <div class="sm-tex-bar">
+                <div>Tex</div>
+                <div>Tex</div>
+                <div>Tex</div>
+                <div>Tex</div>
+            </div>
+        `;
+    }
+    buildFullSmView();
+    
+    const steps = [
+        { step: 0, explanation: "点击“下一步”开始模拟一个 Tiled GEMM Kernel 在 A100 上的执行流程。", components: [] },
+        { step: 1, explanation: "外层循环开始，准备处理输出矩阵 C 的一个分块 (Tile)。这是一个逻辑步骤，由 CPU 控制，GPU 等待指令。", components: [] },
+        { step: 2, explanation: "加载分块：LD/ST 单元启动，从全局内存 (HBM2) 经 L2 缓存，将 A 和 B 矩阵的相应分块加载到 SM 的高速共享内存 (L1 Data Cache) 中。", components: ['.sm-ld-st', '.hbm-stack', '.mem-controller', '.l2-cache', '.sm-l1d-cache-bar', '.hbm-arrow'] },
+        { step: 3, explanation: "内层循环开始，准备对分块进行乘累加。这是一个由 SM 内部控制的循环。", components: ['.sm-warp-scheduler'] },
+        { step: 4, explanation: "加载到寄存器：数据从共享内存被加载到寄存器文件，为 Tensor Core 的计算做准备。", components: ['.sm-l1d-cache-bar', '.sm-register-file'] },
+        { step: 5, explanation: "矩阵乘累加 (MMA)：Tensor Core 被激活，执行核心的矩阵乘法运算，并将结果累加在 C 累加器中。这是 A100 实现极致性能的关键。", components: ['.sm-tensor-core', '.sm-register-file'] },
+        { step: 6, explanation: "内层循环结束。如果 K 维度还有未计算的分块，将跳转回步骤 4 继续累加。", components: ['.sm-dispatch-unit'] },
+        { step: 7, explanation: "写回结果：内层循环完全结束后，LD/ST 单元将累加完毕的结果分块从 SM 写回到全局内存 (HBM2)。", components: ['.sm-ld-st', '.l2-cache', '.mem-controller', '.hbm-stack', '.hbm-arrow'] },
+        { step: 8, explanation: "融合操作 (Fused Operation) 是一种常见的优化手段，它将多个操作合并到一次内存读写中。", components: [] },
+        { step: 9, explanation: "加载偏置向量 (Bias)：在写回结果的同时，LD/ST 单元从全局内存加载对应的偏置向量。", components: ['.sm-ld-st', '.hbm-stack', '.mem-controller', '.l2-cache', '.hbm-arrow'] },
+        { step: 10, explanation: "融合加法：FP32 核心被激活，对刚写回的 C 分块的每个元素执行加法操作，完成 C = C + bias。操作完成后，Kernel 的一次外层循环结束。", components: ['.sm-core-fp32'] },
+    ];
+
+    let currentStep = 0, currentSmIndex = -1;
+    const explanationText = document.getElementById('explanation-text'), nextBtn = document.getElementById('next-btn'), prevBtn = document.getElementById('prev-btn'), codeLines = document.querySelectorAll('.code-line');
+    
+    function updateVisualization() {
+        const stepData = steps[currentStep];
+        
+        smElements.forEach(c => c.classList.remove('scheduled'));
+        document.querySelectorAll('.sm-component, .chip-component, .hbm-arrow, .sm-title-bar, .sm-header-bar, .sm-l1d-cache-bar, .sm-tex-bar > div').forEach(c => c.classList.remove('active'));
+
+        explanationText.textContent = stepData.explanation;
+        codeLines.forEach(line => line.classList.remove('highlight'));
+        
+        const currentLine = document.querySelector(`.code-line[data-step="${currentStep}"]`);
+        if (currentLine) {
+            currentLine.classList.add('highlight');
+        }
+
+        if (currentStep > 0 && stepData.components.length > 0) {
+            currentSmIndex = (currentSmIndex + 1) % smElements.length;
+            smElements[currentSmIndex].classList.add('scheduled');
+        }
+
+        setTimeout(() => {
+            if (currentStep === steps.findIndex(s => s.explanation === stepData.explanation)) {
+                 stepData.components.forEach(selector => {
+                    document.querySelectorAll(selector).forEach(el => el.classList.add('active'));
+                });
+            }
+        }, 100);
+
+        prevBtn.disabled = currentStep === 0;
+        nextBtn.disabled = currentStep === steps.length - 1;
+    }
+
+    nextBtn.addEventListener('click', () => { if (currentStep < steps.length - 1) { currentStep++; updateVisualization(); } });
+    prevBtn.addEventListener('click', () => { if (currentStep > 0) { currentStep--; updateVisualization(); } });
+    
+    updateVisualization();
+});
+</script>
+
+</body>
+</html>
